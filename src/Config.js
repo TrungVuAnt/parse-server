@@ -11,14 +11,14 @@ function removeTrailingSlash(str) {
     return str;
   }
   if (str.endsWith("/")) {
-    str = str.substr(0, str.length-1);
+    str = str.substr(0, str.length - 1);
   }
   return str;
 }
 
 export class Config {
   constructor(applicationId: string, mount: string) {
-    let cacheInfo = AppCache.get(applicationId);
+    const cacheInfo = AppCache.get(applicationId);
     if (!cacheInfo) {
       return;
     }
@@ -32,16 +32,17 @@ export class Config {
     this.restAPIKey = cacheInfo.restAPIKey;
     this.webhookKey = cacheInfo.webhookKey;
     this.fileKey = cacheInfo.fileKey;
-    this.facebookAppIds = cacheInfo.facebookAppIds;
     this.allowClientClassCreation = cacheInfo.allowClientClassCreation;
+    this.userSensitiveFields = cacheInfo.userSensitiveFields;
 
     // Create a new DatabaseController per request
     if (cacheInfo.databaseController) {
-      const schemaCache = new SchemaCache(cacheInfo.cacheController, cacheInfo.schemaCacheTTL);
+      const schemaCache = new SchemaCache(cacheInfo.cacheController, cacheInfo.schemaCacheTTL, cacheInfo.enableSingleSchemaCache);
       this.database = new DatabaseController(cacheInfo.databaseController.adapter, schemaCache);
     }
 
     this.schemaCacheTTL = cacheInfo.schemaCacheTTL;
+    this.enableSingleSchemaCache = cacheInfo.enableSingleSchemaCache;
 
     this.serverURL = cacheInfo.serverURL;
     this.publicServerURL = removeTrailingSlash(cacheInfo.publicServerURL);
@@ -49,6 +50,7 @@ export class Config {
     this.preventLoginWithUnverifiedEmail = cacheInfo.preventLoginWithUnverifiedEmail;
     this.emailVerifyTokenValidityDuration = cacheInfo.emailVerifyTokenValidityDuration;
     this.accountLockout = cacheInfo.accountLockout;
+    this.passwordPolicy = cacheInfo.passwordPolicy;
     this.appName = cacheInfo.appName;
 
     this.analyticsController = cacheInfo.analyticsController;
@@ -56,6 +58,10 @@ export class Config {
     this.hooksController = cacheInfo.hooksController;
     this.filesController = cacheInfo.filesController;
     this.pushController = cacheInfo.pushController;
+    this.pushControllerQueue = cacheInfo.pushControllerQueue;
+    this.pushWorker = cacheInfo.pushWorker;
+    this.hasPushSupport = cacheInfo.hasPushSupport;
+    this.hasPushScheduledSupport = cacheInfo.hasPushScheduledSupport;
     this.loggerController = cacheInfo.loggerController;
     this.userController = cacheInfo.userController;
     this.authDataManager = cacheInfo.authDataManager;
@@ -67,6 +73,7 @@ export class Config {
     this.generateSessionExpiresAt = this.generateSessionExpiresAt.bind(this);
     this.generateEmailVerifyTokenExpiresAt = this.generateEmailVerifyTokenExpiresAt.bind(this);
     this.revokeSessionOnPasswordReset = cacheInfo.revokeSessionOnPasswordReset;
+    this.objectIdSize = cacheInfo.objectIdSize;
   }
 
   static validate({
@@ -78,7 +85,8 @@ export class Config {
     expireInactiveSessions,
     sessionLength,
     emailVerifyTokenValidityDuration,
-    accountLockout
+    accountLockout,
+    passwordPolicy
   }) {
     const emailAdapter = userController.adapter;
     if (verifyUserEmails) {
@@ -86,6 +94,8 @@ export class Config {
     }
 
     this.validateAccountLockoutPolicy(accountLockout);
+
+    this.validatePasswordPolicy(passwordPolicy);
 
     if (typeof revokeSessionOnPasswordReset !== 'boolean') {
       throw 'revokeSessionOnPasswordReset must be a boolean value';
@@ -108,6 +118,49 @@ export class Config {
 
       if (!Number.isInteger(accountLockout.threshold) || accountLockout.threshold < 1 || accountLockout.threshold > 999) {
         throw 'Account lockout threshold should be an integer greater than 0 and less than 1000';
+      }
+    }
+  }
+
+  static validatePasswordPolicy(passwordPolicy) {
+    if (passwordPolicy) {
+      if (passwordPolicy.maxPasswordAge !== undefined && (typeof passwordPolicy.maxPasswordAge !== 'number' || passwordPolicy.maxPasswordAge < 0)) {
+        throw 'passwordPolicy.maxPasswordAge must be a positive number';
+      }
+
+      if (passwordPolicy.resetTokenValidityDuration !== undefined && (typeof passwordPolicy.resetTokenValidityDuration !== 'number' || passwordPolicy.resetTokenValidityDuration <= 0)) {
+        throw 'passwordPolicy.resetTokenValidityDuration must be a positive number';
+      }
+
+      if(passwordPolicy.validatorPattern){
+        if(typeof(passwordPolicy.validatorPattern) === 'string') {
+          passwordPolicy.validatorPattern = new RegExp(passwordPolicy.validatorPattern);
+        }
+        else if(!(passwordPolicy.validatorPattern instanceof RegExp)){
+          throw 'passwordPolicy.validatorPattern must be a regex string or RegExp object.';
+        }
+      }
+
+
+      if(passwordPolicy.validatorCallback && typeof passwordPolicy.validatorCallback !== 'function') {
+        throw 'passwordPolicy.validatorCallback must be a function.';
+      }
+
+      if(passwordPolicy.doNotAllowUsername && typeof passwordPolicy.doNotAllowUsername !== 'boolean') {
+        throw 'passwordPolicy.doNotAllowUsername must be a boolean value.';
+      }
+
+      if (passwordPolicy.maxPasswordHistory && (!Number.isInteger(passwordPolicy.maxPasswordHistory) || passwordPolicy.maxPasswordHistory <= 0 || passwordPolicy.maxPasswordHistory > 20)) {
+        throw 'passwordPolicy.maxPasswordHistory must be an integer ranging 0 - 20';
+      }
+    }
+  }
+
+  // if the passwordPolicy.validatorPattern is configured then setup a callback to process the pattern
+  static setupPasswordValidator(passwordPolicy) {
+    if (passwordPolicy && passwordPolicy.validatorPattern) {
+      passwordPolicy.patternValidator = (value) => {
+        return passwordPolicy.validatorPattern.test(value);
       }
     }
   }
@@ -159,7 +212,15 @@ export class Config {
       return undefined;
     }
     var now = new Date();
-    return new Date(now.getTime() + (this.emailVerifyTokenValidityDuration*1000));
+    return new Date(now.getTime() + (this.emailVerifyTokenValidityDuration * 1000));
+  }
+
+  generatePasswordResetTokenExpiresAt() {
+    if (!this.passwordPolicy || !this.passwordPolicy.resetTokenValidityDuration) {
+      return undefined;
+    }
+    const now = new Date();
+    return new Date(now.getTime() + (this.passwordPolicy.resetTokenValidityDuration * 1000));
   }
 
   generateSessionExpiresAt() {
@@ -167,11 +228,23 @@ export class Config {
       return undefined;
     }
     var now = new Date();
-    return new Date(now.getTime() + (this.sessionLength*1000));
+    return new Date(now.getTime() + (this.sessionLength * 1000));
   }
 
   get invalidLinkURL() {
     return this.customPages.invalidLink || `${this.publicServerURL}/apps/invalid_link.html`;
+  }
+
+  get invalidVerificationLinkURL() {
+    return this.customPages.invalidVerificationLink || `${this.publicServerURL}/apps/invalid_verification_link.html`;
+  }
+
+  get linkSendSuccessURL() {
+    return this.customPages.linkSendSuccess || `${this.publicServerURL}/apps/link_send_success.html`
+  }
+
+  get linkSendFailURL() {
+    return this.customPages.linkSendFail || `${this.publicServerURL}/apps/link_send_fail.html`
   }
 
   get verifyEmailSuccessURL() {
@@ -188,6 +261,10 @@ export class Config {
 
   get passwordResetSuccessURL() {
     return this.customPages.passwordResetSuccess || `${this.publicServerURL}/apps/password_reset_success.html`;
+  }
+
+  get parseFrameURL() {
+    return this.customPages.parseFrameURL;
   }
 
   get verifyEmailURL() {

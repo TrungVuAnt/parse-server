@@ -1,7 +1,7 @@
 import { Parse } from 'parse/node';
-import PromiseRouter from '../PromiseRouter';
 import AdaptableController from './AdaptableController';
 import { LoggerAdapter } from '../Adapters/Logger/LoggerAdapter';
+import url from 'url';
 
 const MILLISECONDS_IN_A_DAY = 24 * 60 * 60 * 1000;
 const LOG_STRING_TRUNCATE_LENGTH = 1000;
@@ -19,8 +19,68 @@ export const LogOrder = {
 
 export class LoggerController extends AdaptableController {
 
+  maskSensitiveUrl(urlString) {
+    const password = url.parse(urlString, true).query.password;
+
+    if (password) {
+      urlString = urlString.replace('password=' + password, 'password=********');
+    }
+    return urlString;
+  }
+
+  maskSensitive(argArray) {
+    return argArray.map(e => {
+      if (!e) {
+        return e;
+      }
+
+      if (typeof e === 'string') {
+        return e.replace(/(password".?:.?")[^"]*"/g, '$1********"');
+      }
+      // else it is an object...
+
+      // check the url
+      if (e.url) {
+        // for strings
+        if (typeof e.url === 'string') {
+          e.url = this.maskSensitiveUrl(e.url);
+        } else if (Array.isArray(e.url)) { // for strings in array
+          e.url = e.url.map(item => {
+            if (typeof item === 'string') {
+              return this.maskSensitiveUrl(item);
+            }
+
+            return item;
+          });
+        }
+      }
+
+      if (e.body) {
+        for (const key of Object.keys(e.body)) {
+          if (key === 'password') {
+            e.body[key] = '********';
+            break;
+          }
+        }
+      }
+
+      if (e.params) {
+        for (const key of Object.keys(e.params)) {
+          if (key === 'password') {
+            e.params[key] = '********';
+            break;
+          }
+        }
+      }
+
+      return e;
+    });
+  }
+
   log(level, args) {
-    args = [].concat(level, [...args]);
+    // make the passed in arguments object an array with the spread operator
+    args = this.maskSensitive([...args]);
+    args = [].concat(level, args);
     this.adapter.log.apply(this.adapter, args);
   }
 
@@ -71,12 +131,12 @@ export class LoggerController extends AdaptableController {
   }
 
   static parseOptions(options = {}) {
-    let from = LoggerController.validDateTime(options.from) ||
+    const from = LoggerController.validDateTime(options.from) ||
       new Date(Date.now() - 7 * MILLISECONDS_IN_A_DAY);
-    let until = LoggerController.validDateTime(options.until) || new Date();
-    let size = Number(options.size) || 10;
-    let order = options.order || LogOrder.DESCENDING;
-    let level = options.level || LogLevel.INFO;
+    const until = LoggerController.validDateTime(options.until) || new Date();
+    const size = Number(options.size) || 10;
+    const order = options.order || LogOrder.DESCENDING;
+    const level = options.level || LogLevel.INFO;
 
     return {
       from,
@@ -94,10 +154,10 @@ export class LoggerController extends AdaptableController {
   // until (optional) End time for the search. Defaults to current time.
   // order (optional) Direction of results returned, either “asc” or “desc”. Defaults to “desc”.
   // size (optional) Number of rows returned by search. Defaults to 10
-  getLogs(options= {}) {
+  getLogs(options = {}) {
     if (!this.adapter) {
       throw new Parse.Error(Parse.Error.PUSH_MISCONFIGURED,
-        'Logger adapter is not availabe');
+        'Logger adapter is not available');
     }
     if (typeof this.adapter.query !== 'function') {
       throw new Parse.Error(Parse.Error.PUSH_MISCONFIGURED,
